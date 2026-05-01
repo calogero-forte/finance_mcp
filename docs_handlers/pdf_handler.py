@@ -1,0 +1,417 @@
+import pymupdf 
+import os 
+import re
+import logging
+
+logger = logging.getLogger(__name__)
+
+class PDFHandler:
+    """
+    This class mantains an internal representation 
+    of a PDF file and, provides methods to search 
+    thoughout its T.O.C. and to extract text from the pages 
+    of selected chapters/sections.
+    """
+
+    def __init__(self, pdf_path_i):
+        """
+        Initialize a PDFHandler
+
+        pdf_path_i: (str) The path (absolute or relative) 
+                    of the pdf file to opern
+
+        Return
+        -------------------
+        A PDFHandler
+        """
+
+        self.pdf_path = pdf_path_i
+        self.pdf_filename = self.__extract_pdf_filename(pdf_path_i)
+    
+        self.pdf = pymupdf.open(pdf_path_i)
+
+        if(not self.pdf.is_pdf):
+            raise Exception("The given file is not a PDF")
+        else:
+            #Number of pages
+            self. page_num = len (self.pdf)
+            # Table of contents in format [level, title, page]
+            self.toc = self.pdf.get_toc(simple = True)
+
+        #Store the TOC index of the last found section
+        self.last_toc_index = -1
+        #Contain the last extracted text
+        self.last_extracted_text = ""
+
+    ##########################################################
+    # Public methods
+    ##########################################################
+
+    def print_toc(self):
+        """
+        Print the table of content of this PDF
+        """
+        for i, item in enumerate(self.toc):
+            print(f"({i})): ", item)
+
+    ##################################################
+
+    def get_pdf_filename(self):
+        """
+
+        Return
+        -------------------
+        (str) the name of this PDF
+        """
+        return self.pdf_filename
+
+    ##################################################
+
+    def get_section_by_heading(self, heading_i, first_occurrance_i = True):
+        """
+        Search for the section with heading i in its title
+        
+        heading_i: (str) The string that shall be included in the 
+                         heading of the searched sections
+
+        first_occurrance_i: (bool) if False, the method does not return
+                            the first occurrance that contains heading_i 
+                            but, the one with the lowest heading level
+
+        Return
+        -------------------
+        toc_index_o: (int) the indexes of the section in the TOC.
+                     -1 if no match has been found
+        """
+        logger.info(f"Searching for section with heading '{heading_i}' (first_occurrance={first_occurrance_i})")
+        toc_index_o = -1
+        indexes = self.__get_toc_entries_by_title(heading_i)
+
+        #Check if at least an entry has been found 
+        if(len(indexes) > 0):
+
+            if(first_occurrance_i):
+                toc_index_o = indexes [0]
+            else:
+                sub_toc = []
+                sub_toc_sorted = None
+
+                for i in indexes:
+                    sub_toc.append( ( i, self.toc[i] ) )
+
+                sub_toc_sorted = self.__sort_toc_entries_by_heading(sub_toc, heading_i)
+                toc_index_o = sub_toc_sorted[0][0]
+
+                logger.info(f"Selected section with lowest heading level: '{self.toc[toc_index_o][1]}'")
+
+        self.last_toc_index = toc_index_o
+        return toc_index_o
+
+    ##################################################
+
+    def get_section_pages(self, section_toc_index_i):
+        """
+        Return all the pages that belong to the given section 
+        i.e. which heading level is ‹ to the one of the given section.
+
+        section_toc_index_i: (int) The index of the
+                             section TOC entry
+
+        Return
+        -------------------
+        section_frame_o: (dict) A dictionary containing the TOC entries information
+                         {'start': {'toc_index', 'page'}, 'end': {...} }
+                         Notice that the 'page' is the value in TOC - 1.
+        """
+
+        start_toc_entry = self.__get_toc_entry(section_toc_index_i)
+        section_frame_o = {
+            'start':
+            {
+                'index': section_toc_index_i,
+                'page': int(start_toc_entry[2]) - 1, # TOC has a 1 offset
+            },
+            'end': None
+        }
+        logger.info(f"Retrieving pages for section index {section_toc_index_i} ('{start_toc_entry[1]}')")
+
+        # Normalizing searched title
+        start_index = section_toc_index_i
+        start_level = int( start_toc_entry[0] )
+        end_index = -1 # At the beginning, it is used as "not found" flag
+
+        # External loop: find the starting section
+        for curr_idx, curr_entry in enumerate(self.toc[start_index + 1: ], start = start_index + 1):
+
+            # End of section found
+            if ( curr_entry[0] <= start_level ):
+                end_index = curr_idx
+                break
+
+        if(end_index > -1):
+            section_frame_o['end'] = {
+                'index': end_index,
+                'page': int(self.__get_toc_entry(end_index)[2]) - 1, # TOC has a 1 offset
+            }
+
+        logger.info(f"Section frame retrieved: {section_frame_o}")
+        return section_frame_o
+
+    ##################################################
+
+    def get_section_text(self, section_frame_i, fine_trimming_i = False):
+        """
+        Get the text content of a pages frame
+
+        section_frame_i: (dict) the output of search_by_title(.)
+
+        fine_trimming_i: (bool) if true, the method calls private sub-rutines 
+                         to better clean the extracted text. Default is False.
+
+        Return
+        -------------------
+        pages_text_o: (str) the text content of the pages frame.
+                      It may be correctly so, an error is signaled returning None
+        """
+
+        page_text_o = ""
+        pages_text_list = []
+
+        # Section extremes
+        start_page = section_frame_i['start']['page']
+        start_index = section_frame_i['start' ]['index']
+        end_page = section_frame_i['end']['page']
+        end_index = section_frame_i['end']['index']
+
+        # Strings to compare
+        sec_title_plain = str( self.toc[start_index][1] )
+        sec_title_norm = self._normalize( sec_title_plain )
+        next_sec_title_norm = self._normalize( str(self.toc[end_index][1] ) )
+
+        # Indexes to navigate the TOC
+        curr_index = start_index # Starting from the first item
+        prev_page = -1 # First previous page set to -1 to skip the check
+
+        logger.info(f"Extracting text from pages {start_page} to {end_page}")
+
+        while( curr_index <= end_index ):
+
+            curr_item = self.toc[curr_index]
+            curr_page = curr_item[2] - 1 # TOC pages have 1 offset
+
+            # Skip heading on the same page
+            if( prev_page == curr_page ):
+                curr_index += 1 
+                continue
+
+            curr_lines = self.__get_page_text ( curr_page )
+
+            # Case: this is the fist page, the text before the heading (included)
+            # shall be removed
+            if(curr_page == start_page):
+                curr_lines = self._remove_text_lines(curr_lines, sec_title_norm)
+
+            # Case: last page. Remove all the text after the next heading (included)
+            if (curr_page == end_page):
+                curr_lines = self._remove_text_lines(curr_lines, next_sec_title_norm, True)
+
+            # Remove shorter lines (it is supposed they are page numbers
+            # and other stuffs like that)
+            if(fine_trimming_i):
+                curr_lines = self._remove_short_lines(curr_lines)
+
+            # Add these lines to the result
+            pages_text_list.append( "".join( curr_lines ) )
+
+            # Increment the indexes
+            prev_page = curr_page
+            curr_index += 1
+
+        logger.info(f"Text extraction completed. Retrieved {len(pages_text_list)} parts.")
+
+        if(len(pages_text_list) > 0):
+            page_text_o = page_text_o.join(pages_text_list)
+            self.last_extracted_text = page_text_o
+            return page_text_o 
+        else:
+            return None
+
+    ##################################################
+
+    def get_section_text_by_heading(self, heading_title_i):
+        """
+        This method embeds the functionalities of
+        - get_section_by_heading
+        - get_ section pages
+        - get_ section_text togheter.
+        It uses get_section_by_heading in the manner of returning the section with the lowest heading level.
+        It uses get_ section text with the fine trimmings enabled.
+        
+        heading_title_i: (str) the key-word that shall be present
+                        in the section title
+
+        Return
+        -------------------
+        pages_text_o: (tuple) (section _heading_o, pages_text_o), the title 
+                      and the text content of the section, if found.
+                      None otherwise.
+        """
+
+        logger.info(f"Getting section text by heading: '{heading_title_i}'")
+        pages_text_o = ""
+        section_heading_o = ""
+
+        sec = self.get_section_by_heading(heading_title_i, first_occurrance_i = False)
+        if(sec == -1):
+            print("Error")
+            # self.logger print_message(f"No section (heading_title_i) found in file {self.pdf_filename)", Logger.LEVEL_ERROR) 
+        else:
+            section_heading_o = self.toc[sec][1]
+            sec_frame = self.get_section_pages(sec)
+            if(sec_frame['end'] == None):
+                print("Error")
+                #self.Logger.print_message(f"Error while retrieving pages from section (heading_title_i) from file {self.pdf_filename)", Logger. LEVEL_EF 
+            else:
+                pages_text_o = self.get_section_text(sec_frame, fine_trimming_i = True)
+                if(pages_text_o == None):
+                    print("Error")
+                    #self.logger-print message(f"No text found for section {heading title_i) in file {self.pdf_filename}™, Logger.LEVEL_ERROR)
+                else:
+                    self.last_extracted_text = pages_text_o
+                    message = f"{heading_title_i} found in file {self.pdf_filename} in [{sec_frame['start']['page'] + 1}, {sec_frame['end']['page'] + 1}]"
+                    # self.logger.print message(message, Logger, LEVEL_ INFO)
+                    print(message)
+
+                    # Successfully return
+                    return (section_heading_o, pages_text_o)
+
+        # Error return
+        return None
+
+    ##################################################
+
+    def save_last_extracted_text(self, output_file_path_i):
+        """
+        Save the last extracted text to a txt file.
+
+        output_file_path_i: (str) Path of the output text file.
+
+        Return
+        -------------------
+        output_file_path_i: (str) The same output path in input.
+        """
+
+        if(not self.last_extracted_text):
+            raise Exception("No extracted text available. Call get_section_text or get_section _text_by_heading first.")
+
+        output_dir = os.path.dirname(output_file_path_i)
+        if(output_dir != ""):
+            os.makedirs(output_dir, exist_ok = True)
+
+        with open(output_file_path_i, "w", encoding = "utf-8") as txt_file:
+            txt_file.write(self.last_extracted_text)
+
+        logger.info(f"Last extracted text successfully saved to {output_file_path_i}")
+        return output_file_path_i
+
+    ##########################################################
+    # Private methods
+    ##########################################################
+
+    def _normalize(self, string_i):
+        """
+        Remove white spaces, dots and numbers and, 
+        put all in lower case.
+        """
+        clean_string = re.sub( r'^\d+(?:\.\d+)*', '', string_i )
+        clean_string = re.sub( r'[.\s]', '', clean_string )
+        return clean_string.lower()
+
+    ##################################################
+
+    def __extract_pdf_filename(self, pdf_path_i):
+        return os.path.basename(pdf_path_i)
+
+    ##################################################
+
+    def __get_toc_entry(self, toc_index_i):
+        if( toc_index_i < 0 or toc_index_i >= len(self.toc)):
+            raise Exception(f"Invalid TOC index {toc_index_i}")
+        return self.toc[toc_index_i]
+
+    ##################################################
+
+    def __get_page_text (self, page_number_i):
+        if(page_number_i < 0 or page_number_i >= self.page_num): 
+            raise Exception(f"Invalid page number {page_number_i}")
+        return self.pdf[page_number_i].get_text("text").splitlines(True) # True -› keep line breaks
+
+    ##################################################
+
+    def _remove_text_lines(self, text_lines_i, line_break_i, forward_i = False):
+
+        line_break_norm = self._normalize(line_break_i)
+        i = 0
+        while( line_break_norm not in self._normalize( text_lines_i[i] ) ):
+            i += 1
+            if( i == len( text_lines_i) ):
+                break
+
+        if(i < 0 or i >= len (text_lines_i) ):
+            raise Exception(f"Line index {i} is out of range")
+
+        if( not forward_i ):
+            return text_lines_i[ i + 1 : ]
+        else:   
+            return text_lines_i[ : i ]
+
+    ##################################################
+
+    def _remove_short_lines(self, text_lines_i, min_words_for_line_i = 3):
+        text_lines_o = []
+        for s in text_lines_i:
+            if( len( s.split() ) >= min_words_for_line_i ):
+                text_lines_o.append(s)
+        return text_lines_o
+
+    ##################################################
+
+    def __get_toc_entries_by_title(self, heading_i):
+
+        correspondences = []
+        heading_norm = self._normalize(heading_i)
+        for idx, item in enumerate(self.toc):
+            if( heading_norm in self._normalize(str( item[1] ) ) ):
+                correspondences.append(idx)
+        
+        return correspondences
+
+    ##################################################
+
+    def __sort_toc_entries_by_heading(self, toc_entries_i, searched_heading_i):
+
+        searched_heading_norm = self._normalize(searched_heading_i)
+
+        def sort_func(toc_item):
+            heading_level = toc_item[1][0]
+            title_norm = self._normalize(str(toc_item[1][1]))
+            heading_pos = title_norm.find(searched_heading_norm)
+
+            # Keep non-matching titles at the end if they ever reach this sorter.
+            if (heading_pos < 0):
+                heading_pos = len(title_norm)
+
+            return (heading_level, heading_pos)
+
+        return sorted( toc_entries_i, key = sort_func )
+
+####################################################################################################
+
+if __name__ == '__main__':
+    logging.basicConfig(level=logging.INFO, format="[%(name)s :  %(levelname)s] %(message)s")
+    pdf_handler = PDFHandler('/Users/calogeroforte/UPF_Handout.pdf')
+    pdf_handler.get_section_text_by_heading("Introduction")
+    pdf_handler.save_last_extracted_text('/Users/calogeroforte/introduction.txt')
+    
+
+
