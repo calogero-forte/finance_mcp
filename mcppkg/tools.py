@@ -6,6 +6,7 @@ import os
 import logging
 from docspkg.pdf_document import PDFDocument
 from docspkg.document import DocumentException
+from docspkg.toc_document import TocDocument
 
 logger = logging.getLogger(__name__)
 
@@ -25,36 +26,48 @@ async def get_current_time() -> str:
 ##################################################
 
 @tool(
-    name="get_pdfs_toc",
-    description="""Retrieve the table of contents of the PDF given by name.
-    In this way the client can understand what topics this PDF covers""",
+    name="get_documents_toc",
+    description="""Retrieve the table of contents of the documents which names contains the keyword (if the document has one).
+    In this way the client can understand what topics these document covers""",
     annotations={"readOnlyHint": True}
 )
-async def get_pdf_toc(pdf_name_i: str, ctx_i: Context) -> str:
+async def get_documents_toc(search_keyword_i: str, ctx_i: Context) -> str:
     """
-    Retrieve the table of contents of the PDF given by name.
+    Retrieve the table of contents of the documents which names contains the keyword (if the document has one).
 
-    pdf_name_i: (str) The name of the PDF file
+    search_keyword_i: (str) The keyword to search for in the document names
     ctx_i: (Context) The FastMCP context
 
     Return
     -------------------
-    (str) The formatted table of contents
+    (dict) The formatted table of contents
     """
-    logger.info(f"Retrieving TOC from PDF '{pdf_name_i}'")
+    logger.info(f"Retrieving TOC from documents containing '{search_keyword_i}'")
     # Get the docs_handler
     doc_handler = ctx_i.request_context.lifespan_context.get("doc_handler")
     # Add a timer or some flag
     doc_handler.sync_documents(os.getenv("LOCAL_PATHS"))
 
-    try:
-        # TODO: adjust this for which is useless for the moment
-        for pdf in doc_handler.filter_documents(name_i = pdf_name_i): 
-            logger.info(f"Successfully retrieved TOC from {pdf.file_name}")
-            return pdf.toc
-    except DocumentException as e:
-        logger.error(f"Error getting TOC: {e} in pdf {pdf.file_name}")
-        raise ToolError("The research didn't yeld any result")
+    res = []
+
+    for doc in doc_handler.filter_documents(name_i = search_keyword_i): 
+        try:
+            if(isinstance(doc, TocDocument)):
+                logger.info(f"Retrieved TOC from {doc.file_name}")
+                res.append({
+                    "document": doc.file_name,
+                    "toc": doc.toc
+                })
+        except DocumentException as e:
+            logger.error(f"Error getting TOC: {e} in doc {doc.file_name}")
+            continue
+    
+    if(len(res) == 0):
+        logger.error(f"No table of contents found for documents containing '{search_keyword_i}'")
+        return f"No table of contents found for documents containing '{search_keyword_i}'"
+            
+    return res
+
 
 ##################################################
 

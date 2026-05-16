@@ -21,7 +21,10 @@ def get_all_documents(context_i: Context) -> str:
     """
     doc_handler = context_i.request_context.lifespan_context.get("doc_handler")
     if doc_handler is None:
+        logger.error("DocumentHandler not found in context.")
         return "Error: DocumentHandler not found in context."
+    
+    logger.info("Accessing all documents resource.")
     
     # Sync with the current content of the directory
     doc_handler.sync_documents( os.getenv("LOCAL_PATHS") )
@@ -29,6 +32,8 @@ def get_all_documents(context_i: Context) -> str:
     result = []
     for doc in doc_handler:
         result.append(f"- {doc.file_name}")
+        
+    logger.info(f"Found {len(result)} documents in the local database.")
         
     if not result:
         return "No documents found in the local database."
@@ -51,7 +56,10 @@ def get_documents_by_name(name_i: str, context_i: Context) -> str:
     """
     doc_handler = context_i.request_context.lifespan_context.get("doc_handler")
     if doc_handler is None:
+        logger.error("DocumentHandler not found in context.")
         return "Error: DocumentHandler not found in context."
+        
+    logger.info(f"Filtering documents by name: '{name_i}'")
         
     # Sync with the current content of the directory
     doc_handler.sync_documents( os.getenv("LOCAL_PATHS") )
@@ -59,6 +67,8 @@ def get_documents_by_name(name_i: str, context_i: Context) -> str:
     result = []
     for doc in doc_handler.filter_documents(name_i=name_i):
         result.append(f"- {doc.file_name}")
+        
+    logger.info(f"Found {len(result)} documents matching name: '{name_i}'")
         
     if not result:
         return f"No documents found matching name: '{name_i}'"
@@ -81,7 +91,10 @@ def get_documents_by_extension(extension_i: str, context_i: Context) -> str:
     """
     doc_handler = context_i.request_context.lifespan_context.get("doc_handler")
     if doc_handler is None:
+        logger.error("DocumentHandler not found in context.")
         return "Error: DocumentHandler not found in context."
+        
+    logger.info(f"Filtering documents by extension: '{extension_i}'")
         
     # Sync with the current content of the directory
     doc_handler.sync_documents( os.getenv("LOCAL_PATHS") )
@@ -89,6 +102,8 @@ def get_documents_by_extension(extension_i: str, context_i: Context) -> str:
     result = []
     for doc in doc_handler.filter_documents(extension_i=extension_i):
         result.append(f"- {doc.file_name}")
+        
+    logger.info(f"Found {len(result)} documents with extension: '{extension_i}'")
         
     if not result:
         return f"No documents found with extension: '{extension_i}'"

@@ -1,5 +1,8 @@
 import os
 from abc import ABC, abstractmethod
+import logging
+
+logger = logging.getLogger(__name__)
 
 class Document(ABC):
     """
@@ -26,6 +29,8 @@ class Document(ABC):
             self.__path = path
             self.__file_name = Document.extract_filename(path)
             self.__page_num = 0
+            #Contain the last extracted text
+            self.last_extracted_text = ""
 
     ##########################################################
     # Public methods
@@ -83,7 +88,30 @@ class Document(ABC):
         """
         return Document.get_file_extension( self.file_name )
 
+    ##################################################
 
+    def save_last_extracted_text(self, output_file_path_i: str) -> str:
+        """
+        Save the last extracted text to a file.
+
+        output_file_path_i: (str) The path to the output file
+
+        Return
+        -------------------
+        (str) The path to the output file
+        """
+        if not self.last_extracted_text:
+            raise DocumentException("No extracted text available.")
+
+        output_dir = os.path.dirname(output_file_path_i)
+        if output_dir != "":
+            os.makedirs(output_dir, exist_ok=True)
+
+        with open(output_file_path_i, "w", encoding="utf-8") as f:
+            f.write(self.last_extracted_text)
+
+        logger.info(f"Last extracted text successfully saved to {output_file_path_i}")
+        return output_file_path_i
 
     ##################################################
 
